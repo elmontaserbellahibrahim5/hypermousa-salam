@@ -638,6 +638,16 @@
               </div>
             </div>
 
+            <!-- Live Matched Item Preview Strip (Directly under scanned barcode!) -->
+            <div id="expMatchedItemPreview" class="hidden sm:col-span-2 lg:col-span-6 bg-slate-800/95 border-2 border-emerald-400/70 rounded-xl px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2 shadow-lg">
+              <div>
+                <span id="expPreviewStatusLabel" class="text-[11px] text-emerald-400 font-black block">✅ تم التعرف على الصنف:</span>
+                <strong id="expPreviewName" class="text-sm text-white block mt-0.5"></strong>
+                <span id="expPreviewMeta" class="text-[11px] text-slate-300"></span>
+              </div>
+              <div id="expPreviewStockBadge" class="text-xs font-black text-amber-300 num-font"></div>
+            </div>
+
             <div>
               <label class="block text-[11px] font-bold text-slate-300 mb-1">2. انتهاء الصلاحية (يوم / شهر / سنة):</label>
               <div class="grid grid-cols-3 gap-1" dir="ltr">
@@ -667,17 +677,9 @@
               <input id="expEmployeeInp" type="text" required placeholder="اكتب اسمك الثلاثي أو الثنائي..." class="w-full px-2.5 py-2 bg-amber-50 text-slate-950 border border-amber-400 rounded-xl font-extrabold">
             </div>
 
-            <!-- Live Matched Item Preview Strip -->
-            <div id="expMatchedItemPreview" class="hidden sm:col-span-2 lg:col-span-4 bg-slate-800 border border-emerald-500/40 rounded-xl px-3 py-2 flex flex-wrap items-center justify-between gap-2">
-              <div>
-                <span class="text-[10px] text-emerald-400 font-extrabold block">✅ تم التعرف على الصنف:</span>
-                <strong id="expPreviewName" class="text-xs text-white"></strong>
-                <span id="expPreviewMeta" class="text-[11px] text-slate-300 mr-2"></span>
-              </div>
-              <div id="expPreviewStockBadge" class="text-xs font-black text-amber-300 num-font"></div>
-            </div>
 
-            <div class="sm:col-span-2 lg:col-span-2 flex gap-2">
+
+            <div class="sm:col-span-2 lg:col-span-6 flex gap-2">
               <input id="expNotesInp" type="text" placeholder="ملاحظة اختيارية..." class="flex-1 px-2.5 py-2 bg-slate-800 text-white border border-slate-600 rounded-xl text-xs font-semibold">
               <button type="submit" class="bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black px-4 py-2 rounded-xl shadow transition shrink-0">💾 حفظ واعتماد</button>
             </div>
@@ -3770,13 +3772,222 @@
       function updateExpiryItemPreview(raw) {
         const prevBox = document.getElementById('expMatchedItemPreview');
         if (!prevBox) return;
-        const it = findItemByBarcodeOrCode(raw);
-        if (!it) { prevBox.classList.add('hidden'); return; }
+        const q = String(raw || '').trim();
+        if (!q) { prevBox.classList.add('hidden'); return; }
+        const it = findItemByBarcodeOrCode(q);
+        const statusLbl = document.getElementById('expPreviewStatusLabel');
+        if (!it) {
+          prevBox.classList.remove('border-emerald-400/70');
+          prevBox.classList.add('border-amber-400/70');
+          if (statusLbl) {
+            statusLbl.textContent = '⚠️ باركود غير موجود في دليل الفرع الحالي:';
+            statusLbl.className = 'text-[11px] text-amber-300 font-black block';
+          }
+          document.getElementById('expPreviewName').textContent = `باركود / كود: ${q}`;
+          document.getElementById('expPreviewMeta').textContent = 'يمكنك استكمال كتابة التاريخ والكمية وحفظه بالباركود مباشرة';
+          document.getElementById('expPreviewStockBadge').innerHTML = `<span class="bg-amber-400 text-slate-950 px-3 py-1 rounded-xl text-xs font-black inline-block">📦 الرصيد: غير مسجل بالدليل</span>`;
+          prevBox.classList.remove('hidden');
+          return;
+        }
+        prevBox.classList.remove('border-amber-400/70');
+        prevBox.classList.add('border-emerald-400/70');
+        if (statusLbl) {
+          statusLbl.textContent = '✅ تم التعرف على الصنف:';
+          statusLbl.className = 'text-[11px] text-emerald-400 font-black block';
+        }
         const m = getItemMetrics(it);
         document.getElementById('expPreviewName').textContent = m.name;
         document.getElementById('expPreviewMeta').textContent = `كود: ${m.code} • ${DATA.lookups.depts[m.dpIdx] || 'عام'} • سعر البيع: ${fmt(m.sell, 2)} ج`;
-        document.getElementById('expPreviewStockBadge').innerHTML = `<span class="bg-emerald-500 text-slate-950 px-3 py-1 rounded-xl text-sm font-black inline-block">📦 الرصيد الحالي بالفرع: ${fmt(m.stk, 1)}</span> <span class="text-[11px] text-amber-300 mr-1">(بيع يومي: ${fmt(m.dailyRate, 2)})</span>`;
+        document.getElementById('expPreviewStockBadge').innerHTML = `<span class="bg-emerald-500 text-slate-950 px-3 py-1.5 rounded-xl text-sm font-black inline-block shadow">📦 الرصيد الحالي بالفرع: ${fmt(m.stk, 1)}</span> <span class="text-[11px] text-amber-300 mr-1">(بيع يومي: ${fmt(m.dailyRate, 2)})</span>`;
         prevBox.classList.remove('hidden');
+      }
+
+      // =========================================================================
+      // HARDWARE-ACCELERATED BARCODE SCANNER (Native BarcodeDetector + Html5Qrcode Fallback)
+      // =========================================================================
+      let nativeCamStream = null;
+      let nativeDetectLoopId = null;
+      let camTorchOn = false;
+      let scannerBusy = false;
+
+      async function stopLiveCameraScanner() {
+        scannerBusy = false;
+        if (nativeDetectLoopId) {
+          clearTimeout(nativeDetectLoopId);
+          nativeDetectLoopId = null;
+        }
+        if (nativeCamStream) {
+          try {
+            nativeCamStream.getTracks().forEach(t => t.stop());
+          } catch (e) {}
+          nativeCamStream = null;
+        }
+        const vid = document.getElementById('nativeBarcodeVideo');
+        if (vid) {
+          try { vid.pause(); vid.srcObject = null; } catch (e) {}
+          vid.classList.add('hidden');
+        }
+        if (liveQrScanner) {
+          try { await liveQrScanner.stop(); } catch (e) {}
+          try { await liveQrScanner.clear(); } catch (e) {}
+          liveQrScanner = null;
+        }
+        const qrDiv = document.getElementById('qrReaderDiv');
+        if (qrDiv) { qrDiv.innerHTML = ''; qrDiv.classList.add('hidden'); }
+        camTorchOn = false;
+        const torchBtn = document.getElementById('toggleCamTorchBtn');
+        if (torchBtn) {
+          torchBtn.classList.add('hidden');
+          torchBtn.textContent = '🔦 الفلاش';
+        }
+        document.getElementById('liveCamContainer')?.classList.add('hidden');
+        document.getElementById('stopLiveCamBtn')?.classList.add('hidden');
+      }
+
+      function onBarcodeScannedSuccess(decodedText) {
+        const cleanCode = String(decodedText || '').trim();
+        if (!cleanCode) return;
+        playScannerBeep();
+        stopLiveCameraScanner();
+
+        const inp = document.getElementById('expBarcodeSearchInp');
+        if (inp) {
+          inp.value = cleanCode;
+        }
+        updateExpiryItemPreview(cleanCode);
+
+        const matched = findItemByBarcodeOrCode(cleanCode);
+        if (matched) {
+          const m = getItemMetrics(matched);
+          showToast(`✅ ${m.name} | الرصيد: ${fmt(m.stk, 1)}`);
+        } else {
+          showToast(`📷 تم مسح الباركود: ${cleanCode}`);
+        }
+
+        // Move focus directly to Day input so employee enters expiry date immediately
+        setTimeout(() => {
+          const dayInp = document.getElementById('expDayInp');
+          if (dayInp) { dayInp.focus(); dayInp.select?.(); }
+        }, 120);
+      }
+
+      async function toggleCameraTorch() {
+        if (!nativeCamStream) return;
+        const track = nativeCamStream.getVideoTracks()[0];
+        if (!track) return;
+        try {
+          camTorchOn = !camTorchOn;
+          await track.applyConstraints({ advanced: [{ torch: camTorchOn }] });
+          const btn = document.getElementById('toggleCamTorchBtn');
+          if (btn) btn.textContent = camTorchOn ? '🔦 إطفاء الفلاش' : '🔦 الفلاش';
+        } catch (e) {
+          showToast('⚠️ الفلاش غير مدعوم على هذا المتصفح');
+        }
+      }
+
+      async function startLiveCameraScanner() {
+        unlockScannerAudio();
+        if (scannerBusy) {
+          await stopLiveCameraScanner();
+          return;
+        }
+        scannerBusy = true;
+
+        const container = document.getElementById('liveCamContainer');
+        const stopBtn = document.getElementById('stopLiveCamBtn');
+        const hint = document.getElementById('camStatusHint');
+        const vid = document.getElementById('nativeBarcodeVideo');
+        const qrDiv = document.getElementById('qrReaderDiv');
+        const torchBtn = document.getElementById('toggleCamTorchBtn');
+
+        container?.classList.remove('hidden');
+        stopBtn?.classList.remove('hidden');
+        if (hint) hint.textContent = '⏳ جاري تشغيل الكاميرا الخلفية...';
+
+        // 1) Preferred Path: Native Hardware BarcodeDetector API (Ultra-fast on Chrome/Android)
+        if ('BarcodeDetector' in window && navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+          try {
+            const supportedFormats = typeof window.BarcodeDetector.getSupportedFormats === 'function'
+              ? await window.BarcodeDetector.getSupportedFormats()
+              : ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'code_39', 'itf'];
+            const targetFormats = ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'code_39', 'itf', 'codabar'].filter(f => supportedFormats.includes(f));
+            if (targetFormats.length > 0) {
+              const detector = new window.BarcodeDetector({ formats: targetFormats });
+              nativeCamStream = await navigator.mediaDevices.getUserMedia({
+                video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
+                audio: false
+              });
+              vid.srcObject = nativeCamStream;
+              vid.classList.remove('hidden');
+              qrDiv?.classList.add('hidden');
+              await vid.play();
+
+              // Enable Torch button if rear camera supports flashlight
+              const track = nativeCamStream.getVideoTracks()[0];
+              if (track && typeof track.getCapabilities === 'function') {
+                const caps = track.getCapabilities();
+                if (caps && caps.torch) torchBtn?.classList.remove('hidden');
+              }
+
+              if (hint) hint.textContent = '📷 وجّه الكاميرا نحو خطوط باركود الصنف — المسح تلقائي بصوت';
+              const scanTick = async () => {
+                if (!scannerBusy || !nativeCamStream) return;
+                try {
+                  if (vid.readyState >= 2) {
+                    const codes = await detector.detect(vid);
+                    if (codes && codes.length > 0 && codes[0].rawValue) {
+                      onBarcodeScannedSuccess(codes[0].rawValue);
+                      return;
+                    }
+                  }
+                } catch (e) {}
+                nativeDetectLoopId = setTimeout(scanTick, 110);
+              };
+              scanTick();
+              return;
+            }
+          } catch (nativeErr) {
+            console.warn('Native BarcodeDetector fallback:', nativeErr);
+            if (nativeCamStream) {
+              try { nativeCamStream.getTracks().forEach(t => t.stop()); } catch (e) {}
+              nativeCamStream = null;
+            }
+          }
+        }
+
+        // 2) Fallback Path: Html5Qrcode (1D Product Barcodes Only — Ignores QR Codes)
+        if (typeof Html5Qrcode !== 'undefined') {
+          try {
+            vid?.classList.add('hidden');
+            qrDiv?.classList.remove('hidden');
+            const formats1D = (typeof Html5QrcodeSupportedFormats !== 'undefined') ? [
+              Html5QrcodeSupportedFormats.EAN_13,
+              Html5QrcodeSupportedFormats.EAN_8,
+              Html5QrcodeSupportedFormats.UPC_A,
+              Html5QrcodeSupportedFormats.UPC_E,
+              Html5QrcodeSupportedFormats.CODE_128,
+              Html5QrcodeSupportedFormats.CODE_39,
+              Html5QrcodeSupportedFormats.ITF
+            ] : undefined;
+            liveQrScanner = new Html5Qrcode('qrReaderDiv', formats1D ? { formatsToSupport: formats1D, verbose: false } : false);
+            if (hint) hint.textContent = '📷 وجّه الكاميرا نحو خطوط باركود الصنف — المسح تلقائي بصوت';
+            await liveQrScanner.start(
+              { facingMode: 'environment' },
+              { fps: 12, qrbox: { width: 260, height: 110 }, aspectRatio: 1.5 },
+              (decodedText) => onBarcodeScannedSuccess(decodedText),
+              () => {}
+            );
+            return;
+          } catch (qrErr) {
+            console.error('Html5Qrcode error:', qrErr);
+            await stopLiveCameraScanner();
+            showToast('⚠️ تعذر فتح الكاميرا — تأكد من منح إذن الكاميرا للمتصفح');
+            return;
+          }
+        }
+
+        await stopLiveCameraScanner();
+        showToast('⚠️ المتصفح لا يدعم تشغيل الكاميرا — يمكنك كتابة الباركود يدوياً');
       }
 
 
@@ -4422,6 +4633,162 @@
           saveToIDB(); renderUsersManagerUI(); applyUserPermissions(); renderAll();
           document.getElementById('userEditForm').reset(); document.getElementById('editUserIdInp').value = '';
           showToast(`✅ تم حفظ صلاحيات (${newObj.displayName})`);
+        });
+
+        // =========================================================================
+        // EXPIRY TAB & BARCODE CAMERA SCANNER LISTENERS
+        // =========================================================================
+        document.getElementById('startLiveCamBtn')?.addEventListener('click', () => startLiveCameraScanner());
+        document.getElementById('stopLiveCamBtn')?.addEventListener('click', () => stopLiveCameraScanner());
+        document.getElementById('toggleCamTorchBtn')?.addEventListener('click', () => toggleCameraTorch());
+
+        document.getElementById('expBarcodeSearchInp')?.addEventListener('input', e => updateExpiryItemPreview(e.target.value));
+        document.getElementById('expBarcodeSearchInp')?.addEventListener('change', e => updateExpiryItemPreview(e.target.value));
+
+        // Fast auto-advance for DD / MM / YYYY inputs on mobile
+        document.getElementById('expDayInp')?.addEventListener('input', e => {
+          if (String(e.target.value).length >= 2) document.getElementById('expMonthInp')?.focus();
+        });
+        document.getElementById('expMonthInp')?.addEventListener('input', e => {
+          if (String(e.target.value).length >= 2) document.getElementById('expYearInp')?.focus();
+        });
+        document.getElementById('expYearInp')?.addEventListener('input', e => {
+          if (String(e.target.value).length >= 4) document.getElementById('expQtyInp')?.focus();
+        });
+
+        document.getElementById('expiryEntryForm')?.addEventListener('submit', async e => {
+          e.preventDefault();
+          const rawBc = (document.getElementById('expBarcodeSearchInp')?.value || '').trim();
+          const dd = parseInt(document.getElementById('expDayInp')?.value, 10);
+          const mm = parseInt(document.getElementById('expMonthInp')?.value, 10);
+          const yyyy = parseInt(document.getElementById('expYearInp')?.value, 10);
+          const qty = parseFloat(document.getElementById('expQtyInp')?.value);
+          const loc = document.getElementById('expLocationSel')?.value || 'الرف / الصالة';
+          const empName = (document.getElementById('expEmployeeInp')?.value || '').trim();
+          const notes = (document.getElementById('expNotesInp')?.value || '').trim();
+
+          if (!rawBc) { showToast('⚠️ امسح أو اكتب الباركود أولاً'); return; }
+          if (!dd || dd < 1 || dd > 31 || !mm || mm < 1 || mm > 12 || !yyyy || yyyy < 2024 || yyyy > 2040) {
+            showToast('⚠️ أدخل تاريخ صلاحية صحيح (يوم / شهر / سنة)');
+            return;
+          }
+          if (!qty || qty <= 0) { showToast('⚠️ أدخل الكمية بشكل صحيح'); return; }
+          if (!empName) { showToast('⚠️ اسم الموظف المسجّل إلزامي'); return; }
+
+          try { localStorage.setItem('hm_v24_emp_name', empName); } catch (err) {}
+
+          const isoDate = `${yyyy}-${String(mm).padStart(2, '0')}-${String(dd).padStart(2, '0')}`;
+          const matched = findItemByBarcodeOrCode(rawBc);
+          const m = matched ? getItemMetrics(matched) : null;
+
+          const now = new Date();
+          const dateAdded = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+
+          const rec = {
+            id: 'EXP-' + Date.now().toString().slice(-6),
+            date_added: dateAdded,
+            code: m ? m.code : rawBc,
+            bc: m ? (m.bc || rawBc) : rawBc,
+            item_name: m ? m.name : `صنف (${rawBc})`,
+            dept: m ? (DATA.lookups.depts[m.dpIdx] || 'عام') : 'عام',
+            vendor: m ? (DATA.lookups.vendors[m.vIdx] || 'غير محدد') : 'غير محدد',
+            expiry_date: isoDate,
+            qty: qty,
+            location: loc,
+            employee_name: empName,
+            action_status: 'متابعة على الرف',
+            notes: notes
+          };
+
+          if (!Array.isArray(DATA.expiry_records)) DATA.expiry_records = [];
+          DATA.expiry_records.unshift(rec);
+          saveToIDB();
+          renderExpiryTab();
+
+          // Clear item fields for next scan (keep employee name & year)
+          document.getElementById('expBarcodeSearchInp').value = '';
+          document.getElementById('expDayInp').value = '';
+          document.getElementById('expMonthInp').value = '';
+          document.getElementById('expQtyInp').value = '';
+          document.getElementById('expNotesInp').value = '';
+          document.getElementById('expMatchedItemPreview')?.classList.add('hidden');
+
+          const synced = await syncExpiryWithServer('add', rec);
+          showToast(synced ? `✅ تم حفظ صلاحية (${rec.item_name}) ومزامنتها سحابياً` : `✅ تم حفظ صلاحية (${rec.item_name}) محلياً`);
+        });
+
+        // Expiry Division & Department Slicers + Reset + Presets
+        document.getElementById('expFilterDivSel')?.addEventListener('change', e => {
+          state.expDiv = e.target.value;
+          state.expDept = '';
+          renderExpiryTab();
+        });
+        document.getElementById('expFilterDeptSel')?.addEventListener('change', e => {
+          state.expDept = e.target.value;
+          renderExpiryTab();
+        });
+        document.getElementById('expResetFiltersBtn')?.addEventListener('click', () => {
+          state.expDiv = '';
+          state.expDept = '';
+          state.ePreset = 'all';
+          document.querySelectorAll('.e-preset').forEach(b => b.classList.toggle('active', b.dataset.epreset === 'all'));
+          renderExpiryTab();
+        });
+        document.querySelectorAll('.e-preset').forEach(btn => {
+          btn.addEventListener('click', () => {
+            state.ePreset = btn.dataset.epreset || 'all';
+            document.querySelectorAll('.e-preset').forEach(b => b.classList.toggle('active', b === btn));
+            renderExpiryTab();
+          });
+        });
+
+        // Manager-Only Expiry Status Update & Delete
+        document.getElementById('expiryTableBody')?.addEventListener('change', async e => {
+          const sel = e.target.closest('select[data-exp-action-id]');
+          if (!sel || !isExpiryAdmin()) return;
+          const id = sel.getAttribute('data-exp-action-id');
+          const rec = (DATA.expiry_records || []).find(r => String(r.id) === String(id));
+          if (!rec) return;
+          rec.action_status = sel.value;
+          saveToIDB();
+          await syncExpiryWithServer('update', rec);
+          showToast(`✅ تم تحديث حالة الصلاحية إلى: ${rec.action_status}`);
+        });
+        document.getElementById('expiryTableBody')?.addEventListener('click', async e => {
+          const delBtn = e.target.closest('button[data-exp-del-id]');
+          if (!delBtn || !isExpiryAdmin()) return;
+          e.stopPropagation();
+          const id = delBtn.getAttribute('data-exp-del-id');
+          const idx = (DATA.expiry_records || []).findIndex(r => String(r.id) === String(id));
+          if (idx === -1) return;
+          const [removed] = DATA.expiry_records.splice(idx, 1);
+          saveToIDB();
+          renderExpiryTab();
+          await syncExpiryWithServer('delete', removed);
+          showToast('🗑️ تم حذف سجل الصلاحية ومزامنة الحذف سحابياً');
+        });
+
+        // Export Expiry Sheet to Excel
+        document.getElementById('expExportExcelBtn')?.addEventListener('click', () => {
+          if (typeof XLSX === 'undefined') { showToast('⚠️ مكتبة الإكسيل غير محمّلة'); return; }
+          const rows = (DATA.expiry_records || []).map(r => ({
+            'الكود': r.code,
+            'الباركود': r.bc,
+            'اسم الصنف': r.item_name,
+            'القسم': r.dept,
+            'تاريخ الانتهاء': formatDateDMY(r.expiry_date),
+            'الكمية': r.qty,
+            'المكان': r.location,
+            'الموظف المسجّل': r.employee_name,
+            'تاريخ التسجيل': r.date_added,
+            'الإجراء': r.action_status,
+            'ملاحظات': r.notes || ''
+          }));
+          const ws = XLSX.utils.json_to_sheet(rows);
+          const wb = XLSX.utils.book_new();
+          XLSX.utils.book_append_sheet(wb, ws, 'الصلاحيات');
+          XLSX.writeFile(wb, `Expiry_Report_${getBranchContext().key}_${new Date().toISOString().slice(0,10)}.xlsx`);
+          showToast('📊 تم تصدير كشف الصلاحيات إكسيل');
         });
       });
     })();
